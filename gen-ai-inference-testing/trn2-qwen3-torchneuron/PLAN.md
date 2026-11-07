@@ -88,10 +88,16 @@ Both TorchNeuron and the vLLM plugin are **Beta**. Expect API churn and pin exac
 testbed, not just a single-replica box — and the repo's existing `serve` script already builds
 replica "core groups" automatically, so this is reachable.
 
-> `serve` derives replicas from `NEURON_CORES_PER_DEVICE`, which `run.sh` auto-detects from
-> `neuron-ls --json-output | grep nc_count`. Verify on hardware whether that reports **8**
-> (physical) or **4** (logical at LNC2) on trn2. If it reports physical cores, the replica math
-> is off by 2x and `NEURON_CORES_PER_DEVICE` must be set explicitly. **Open item O-1.**
+> **O-1 RESOLVED on hardware 2026-11-07** (`i-02b1dc0805521506e`, trn2.48xlarge):
+> `neuron-ls --json-output` reports **`"nc_count": 4`** — i.e. **logical** cores per device at
+> LNC2, not physical. `neuron-ls` also confirms `logical-neuroncore-config: 2`, so **LNC2 is the
+> instance default** and needs no explicit setting. 16 devices x 4 = 64 logical cores, core IDs
+> `0-63`, 96 GB per device.
+>
+> Consequence: the repo's existing `serve` replica math (`len(devices) * nc_count`) is **correct
+> as-is** on trn2 — no `NEURON_CORES_PER_DEVICE` override needed. With
+> `TENSOR_PARALLEL_SIZE=8` it yields 8 core-groups of 8 logical cores, matching the 8-replica
+> figure below.
 
 **BF16 only on trn2.** The Qwen3-32B recipe offers MXFP8, but the docs state it needs **Trn3**;
 Trn2 is BF16 for this model. Do not plan FP8 numbers on this instance.
@@ -337,7 +343,8 @@ specifically wants to evaluate and it is where the "native PyTorch" claim is act
 
 ## 8. Open items
 
-- **O-1** Does `neuron-ls --json-output` report `nc_count` as physical (8) or logical (4) per device at LNC2?
+- ~~**O-1** Does `neuron-ls --json-output` report `nc_count` as physical (8) or logical (4) per device at LNC2?~~
+  **RESOLVED 2026-11-07: logical (4).** LNC2 is the instance default; existing replica math is correct. See Section 3.
 - **O-2** When to fold into `launch.sh`/`compose/neuron.yaml` vs stay standalone.
 - **O-3** Is `Qwen/Qwen3-32B` gated? Confirm `HF_TOKEN` need and pin `BF16_REVISION` for reproducibility.
 - **O-4** Exact `--optimization-level` semantics (recipe uses O2 single-server, O3 for disaggregated decode).

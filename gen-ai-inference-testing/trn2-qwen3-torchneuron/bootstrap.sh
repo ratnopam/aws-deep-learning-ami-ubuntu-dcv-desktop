@@ -127,9 +127,29 @@ fi
 mkdir -p "$CACHE_DIR" "$MODEL_DIR"
 
 # --- 4. container image -------------------------------------------------
-phase IMAGE "pulling $DLC"
-docker pull "$DLC" || fail "docker pull"
-( cd "$EX" && docker buildx build -t "$IMAGE_TAG" -f containers/Dockerfile . ) || fail "docker build"
+# Prefer the pre-built, off-block-validated image from ECR. It was built and
+# pushed on 2026-11-13 from this same Dockerfile, and its vLLM import was
+# confirmed working (it failed only on "No neuron device available", which is
+# the correct failure on a non-accelerator host). Pulling it skips a ~4.5 min
+# build and removes build failure from the critical path.
+ECR_IMAGE="${ECR_IMAGE:-489829964455.dkr.ecr.us-east-2.amazonaws.com/dl-lab-inference:qwen3-trn2-validated}"
+ECR_REGISTRY="${ECR_IMAGE%%/*}"
+phase IMAGE "trying prebuilt $ECR_IMAGE"
+if aws ecr get-login-password --region "${AWS_REGION:-us-east-2}" 2>/dev/null \
+     | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null 2>&1 \
+   && docker pull "$ECR_IMAGE" >/dev/null 2>&1; then
+  docker tag "$ECR_IMAGE" "$IMAGE_TAG" || fail "docker tag"
+  phase IMAGE_PREBUILT "pulled validated image from ECR"
+else
+  phase IMAGE_BUILD "ECR unavailable -- building from $DLC"
+  docker pull "$DLC" || fail "docker pull"
+  # buildx may not be present on every base; fall back to classic build.
+  if docker buildx version >/dev/null 2>&1; then
+    ( cd "$EX" && docker buildx build -t "$IMAGE_TAG" -f containers/Dockerfile . ) || fail "docker buildx build"
+  else
+    ( cd "$EX" && docker build -t "$IMAGE_TAG" -f containers/Dockerfile . ) || fail "docker build"
+  fi
+fi
 # Confirm the plugin reports the neuron platform. Needs devices, hence
 # --privileged, and it is cheap insurance before a 20-minute compile.
 PLAT=$(docker run --rm --privileged -v /dev:/dev "$IMAGE_TAG" \

@@ -79,17 +79,52 @@ EX="$REPO_DIR/gen-ai-inference-testing/trn2-qwen3-torchneuron"
 [[ -d "$EX" ]] || fail "example dir missing after clone"
 chmod +x "$EX"/serve/*.sh "$EX"/bench/*.sh 2>/dev/null || true
 
-# --- 3. restore a previous compile cache if one exists -------------------
-# This is what makes a second block cheap: a warm cache skips ~20 min of
-# cold compile per config. Fingerprints invalidate on version/config change,
-# so a restore may still miss -- that is fine, it just recompiles.
-phase CACHE_RESTORE
-if aws s3 ls "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" >/dev/null 2>&1; then
-  aws s3 sync "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" "$CACHE_DIR/" --only-show-errors \
-    && phase CACHE_RESTORE_OK "files=$(find "$CACHE_DIR" -type f | wc -l | tr -d ' ')"
+# --- 3. durable store: NVMe, then restore cache and weights --------------
+# Delegated to labstore (gen-ai-inference-testing/labstore), which keys the
+# compile cache by accelerator class/model + stack hash + topology, so a
+# restore is only reported warm when the fingerprint inputs actually match.
+# If labstore is unavailable this falls back to the old flat S3 prefix, so
+# the bootstrap still works standalone.
+LABSTORE="$REPO_DIR/gen-ai-inference-testing/labstore/labstore.sh"
+export LAB_EFS_ROOT="${LAB_EFS_ROOT:-$EFS/lab}"
+export LAB_S3_BUCKET="${LAB_S3_BUCKET:-$S3_BUCKET}"
+export MODEL_ID MODEL_REVISION="$BF16_REVISION"
+export TOPOLOGY="${TOPOLOGY:-tp8-lnc2}"
+
+if [[ -x "$LABSTORE" ]]; then
+  # 7.6 TB of instance-store NVMe on trn2.48xlarge is unused by default;
+  # weights belong there, not on EFS or the 1 TB root volume.
+  phase NVME
+  sudo -E "$LABSTORE" nvme-setup 2>&1 | tail -3 || phase NVME_WARN "continuing on EBS"
+  if mountpoint -q /mnt/nvme 2>/dev/null; then
+    export LAB_LOCAL_ROOT=/mnt/nvme/lab
+    phase NVME_OK "$(df -h /mnt/nvme | tail -1 | awk '{print $2" usable"}')"
+  else
+    export LAB_LOCAL_ROOT="$HOME_DIR/lab-local"
+    phase NVME_SKIP "no instance store; using $LAB_LOCAL_ROOT"
+  fi
+
+  phase STORE_INIT
+  "$LABSTORE" init 2>&1 | tail -4
+
+  phase STORE_RESUME "restoring cache + hydrating weights"
+  RESUME_OUT=$("$LABSTORE" resume 2>&1) || true
+  echo "$RESUME_OUT"
+  # resume emits the exports it wants us to use; adopt them.
+  eval "$(printf '%s\n' "$RESUME_OUT" | grep -E '^export (VLLM_CACHE_ROOT|MODEL_PATH)=')" || true
+  CACHE_DIR="${VLLM_CACHE_ROOT:-$CACHE_DIR}"
+  MODEL_DIR="${MODEL_PATH:-$MODEL_DIR}"
+  phase STORE_RESUME_OK "cache=$CACHE_DIR model=$MODEL_DIR"
 else
-  phase CACHE_RESTORE_SKIP "no prior cache in s3"
+  phase CACHE_RESTORE "labstore unavailable; flat S3 fallback"
+  if aws s3 ls "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" >/dev/null 2>&1; then
+    aws s3 sync "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" "$CACHE_DIR/" --only-show-errors \
+      && phase CACHE_RESTORE_OK "files=$(find "$CACHE_DIR" -type f | wc -l | tr -d ' ')"
+  else
+    phase CACHE_RESTORE_SKIP "no prior cache in s3"
+  fi
 fi
+mkdir -p "$CACHE_DIR" "$MODEL_DIR"
 
 # --- 4. container image -------------------------------------------------
 phase IMAGE "pulling $DLC"
@@ -131,10 +166,18 @@ phase PRECOMPILE_OK "cache files=$(find "$CACHE_DIR" -type f | wc -l | tr -d ' '
 
 # --- 7. back the cache up immediately -----------------------------------
 # Before serving, not after. If anything later goes wrong, the expensive
-# artifact is already safe.
+# artifact is already safe. labstore also writes a MANIFEST.json recording
+# the exact versions and topology, without which the next run cannot tell
+# whether the cache is reusable.
 phase CACHE_BACKUP
-aws s3 sync "$CACHE_DIR/" "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" --only-show-errors \
-  && phase CACHE_BACKUP_OK || phase CACHE_BACKUP_WARN "s3 sync failed, cache still on EFS"
+if [[ -x "$LABSTORE" ]]; then
+  VLLM_CACHE_ROOT="$CACHE_DIR" "$LABSTORE" save 2>&1 | tail -5 \
+    && phase CACHE_BACKUP_OK "manifest written, synced to S3" \
+    || phase CACHE_BACKUP_WARN "labstore save failed; cache still on EFS"
+else
+  aws s3 sync "$CACHE_DIR/" "s3://$S3_BUCKET/trn2-qwen3/compile-cache/" --only-show-errors \
+    && phase CACHE_BACKUP_OK || phase CACHE_BACKUP_WARN "s3 sync failed, cache still on EFS"
+fi
 
 # --- 8. serve (warm start) ----------------------------------------------
 phase SERVE

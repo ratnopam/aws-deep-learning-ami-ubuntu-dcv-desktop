@@ -36,6 +36,17 @@
 #   LAB_S3_BUCKET   default dl-lab-store-489829964455-us-east-2
 set -uo pipefail
 
+# HOME is not guaranteed. cloud-init UserData runs with a minimal environment,
+# and under `set -u` an unset HOME is fatal -- which is exactly how this failed
+# on first contact with a real instance ("line 42: HOME: unbound variable").
+# Resolve it from passwd rather than assuming /root, so the fallback is still
+# correct when invoked as a non-root user.
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  [[ -n "$HOME" ]] || HOME=/tmp
+  export HOME
+fi
+
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-32B}"
 MODEL_REVISION="${MODEL_REVISION:-main}"
 TOPOLOGY="${TOPOLOGY:-}"

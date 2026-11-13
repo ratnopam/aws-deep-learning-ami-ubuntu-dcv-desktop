@@ -85,17 +85,54 @@ cmd_nvme_setup() {
   if mountpoint -q /mnt/nvme 2>/dev/null; then
     say "already mounted:"; df -h /mnt/nvme | tail -1; return 0
   fi
-  mapfile -t DISKS < <(lsblk -dn -o NAME,TYPE,MOUNTPOINT 2>/dev/null \
-    | awk '$2=="disk" && $3=="" {print "/dev/"$1}' \
-    | while read -r d; do
-        # instance store only: exclude the root EBS device and anything mounted
-        if ! lsblk -n -o MOUNTPOINT "$d" 2>/dev/null | grep -q .; then echo "$d"; fi
-      done)
+  # SAFETY: select ONLY disks whose device model reports EC2 instance storage.
+  #
+  # An earlier version selected any unmounted whole disk. That is dangerous:
+  # a blank, unmounted secondary EBS volume looks identical to instance store
+  # by that test, and this function runs mdadm --create + mkfs.xfs under sudo.
+  # A simulated topology with one spare EBS volume confirmed the old logic
+  # would have reformatted it. Model matching eliminates the whole class:
+  # instance store reports "Amazon EC2 NVMe Instance Storage", EBS reports
+  # "Amazon Elastic Block Store".
+  #
+  # If no instance-store disk is found we do nothing and fall back to $HOME --
+  # never guess. LABSTORE_NVME_DEVICES can override explicitly.
+  DISKS=()
+  if [[ -n "${LABSTORE_NVME_DEVICES:-}" ]]; then
+    read -r -a DISKS <<<"$LABSTORE_NVME_DEVICES"
+    say "using explicitly supplied devices: ${DISKS[*]}"
+  else
+    while IFS= read -r d; do
+      [[ -n "$d" ]] && DISKS+=("$d")
+    done < <(lsblk -dn -o NAME,MODEL 2>/dev/null \
+      | grep -i 'Instance Storage' \
+      | awk '{print "/dev/"$1}' \
+      | while read -r dev; do
+          # Belt and braces: skip anything with a mountpoint on it or any
+          # of its partitions.
+          if ! lsblk -n -o MOUNTPOINT "$dev" 2>/dev/null | grep -q .; then echo "$dev"; fi
+        done)
+  fi
+
   if (( ${#DISKS[@]} == 0 )); then
-    say "no unmounted local disks found -- falling back to \$HOME (fine on EBS-only types)"
+    say "no EC2 instance-store disks found -- falling back to \$HOME"
+    say "  (expected on m5/inf2/most GPU types; trn2.48xlarge should report 4)"
     return 0
   fi
-  say "found ${#DISKS[@]} candidate disk(s): ${DISKS[*]}"
+  say "found ${#DISKS[@]} instance-store disk(s): ${DISKS[*]}"
+
+  # Refuse outright if anything selected is not instance store, in case an
+  # override was passed carelessly.
+  for d in "${DISKS[@]}"; do
+    if lsblk -n -o MOUNTPOINT "$d" 2>/dev/null | grep -q .; then
+      die "$d has a mountpoint -- refusing to reformat it"
+    fi
+    model=$(lsblk -dn -o MODEL "$d" 2>/dev/null || true)
+    if [[ -n "$model" ]] && ! printf '%s' "$model" | grep -qi 'Instance Storage'; then
+      die "$d model is '$model', not instance storage -- refusing to reformat it"
+    fi
+  done
+
   [[ $EUID -eq 0 ]] || die "nvme-setup needs root: sudo -E $0 nvme-setup"
 
   if (( ${#DISKS[@]} == 1 )); then

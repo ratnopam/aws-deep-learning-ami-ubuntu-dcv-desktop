@@ -134,9 +134,16 @@ Resources:
           Ebs:
             VolumeSize: !Ref VolumeSizeGb
             VolumeType: gp3
-            # gp3 default is 125 MB/s, which would throttle a 65 GB download.
-            Throughput: 500
             Iops: 6000
+            # NOTE: gp3 `Throughput` is deliberately absent. AWS::EC2::Instance's
+            # BlockDeviceMappings.Ebs does NOT support it -- the property exists
+            # only on AWS::EC2::LaunchTemplate and AWS::EC2::Volume, and
+            # including it fails AWS::EarlyValidation::PropertyValidation with a
+            # generic "Validation failed with 1 error(s)" that names no resource.
+            # So this volume runs at the gp3 default 125 MB/s. For a ~65 GB
+            # checkpoint that is roughly 9 minutes of write and 9 of read --
+            # acceptable for a one-off. If staging a 650 GB model, switch this
+            # resource to a LaunchTemplate so Throughput can be raised.
             Encrypted: true
             DeleteOnTermination: true
       Tags:

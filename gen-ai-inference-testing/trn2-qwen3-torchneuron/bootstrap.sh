@@ -148,6 +148,19 @@ else
   phase CHECKPOINT_OK "$(du -sh "$MODEL_DIR" | cut -f1)"
 fi
 
+# Seed S3 with the checkpoint so EVERY FUTURE block skips the HuggingFace
+# download entirely -- `labstore resume` then hydrates from S3 in-region,
+# which is far faster and cannot be rate-limited by a third party. This runs
+# inside the prepaid pre-stage window, so it costs no testing time.
+if [[ -x "$LABSTORE" ]]; then
+  phase WEIGHTS_PUSH "seeding S3 for future sessions"
+  if WEIGHTS_SRC="$MODEL_DIR" "$LABSTORE" push-weights 2>&1 | tail -3; then
+    phase WEIGHTS_PUSH_OK
+  else
+    phase WEIGHTS_PUSH_WARN "push failed; weights still on local/EFS"
+  fi
+fi
+
 # --- 6. precompile ------------------------------------------------------
 # The single highest-leverage step. VLLM_NEURON_BACKEND and VLLM_CACHE_ROOT
 # must be in the environment before Python starts.

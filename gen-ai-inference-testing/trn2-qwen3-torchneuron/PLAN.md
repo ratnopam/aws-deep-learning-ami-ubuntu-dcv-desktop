@@ -406,7 +406,11 @@ specifically wants to evaluate and it is where the "native PyTorch" claim is act
 - ~~**O-1** Does `neuron-ls --json-output` report `nc_count` as physical (8) or logical (4) per device at LNC2?~~
   **RESOLVED 2026-11-07: logical (4).** LNC2 is the instance default; existing replica math is correct. See Section 3.
 - **O-2** When to fold into `launch.sh`/`compose/neuron.yaml` vs stay standalone.
-- **O-3** Is `Qwen/Qwen3-32B` gated? Confirm `HF_TOKEN` need and pin `BF16_REVISION` for reproducibility.
+- ~~**O-3** Is `Qwen/Qwen3-32B` gated? Confirm `HF_TOKEN` need and pin `BF16_REVISION` for reproducibility.~~
+  **RESOLVED 2026-11-13: not gated.** Downloaded with no `HF_TOKEN` supplied. 62 GB on disk,
+  **65,540,308,523 bytes / 84 objects / 18 safetensors shards** staged to
+  `s3://dl-lab-store-489829964455-us-east-2/lab/models/qwen-qwen3-32b`.
+  Pinning a revision SHA is still worth doing before publishing numbers; `main` was used here.
 - **O-4** Exact `--optimization-level` semantics (recipe uses O2 single-server, O3 for disaggregated decode).
 - ~~**O-5** Does a 1k-input shape need its own bucket config, given buckets are pinned at 8192?~~
   **RESOLVED from docs: yes.** The Neuron `torch.compile` backend forces `dynamic=False`, so

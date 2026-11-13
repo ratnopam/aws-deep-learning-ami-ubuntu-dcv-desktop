@@ -20,6 +20,16 @@ MODEL="${MODEL:-qwen3-32b}"
 RESULTS_DIR="${RESULTS_DIR:-./results}"
 
 # "input:output" token shapes -- spanning prefill-bound to decode-bound.
+#
+# IMPORTANT: Neuron's torch.compile backend forces dynamic=False, so each
+# distinct shape needs a compiled bucket. These shapes and concurrencies MUST
+# be covered by the server's neuron_config buckets, or the sweep triggers
+# recompiles mid-run and the latency numbers become meaningless.
+#
+# Start the server with SWEEP_MODE=1 (see serve/run_qwen3_32b.sh) so one
+# compile covers the whole matrix below. If the server is running the
+# published control config (num_seqs_buckets [4]), restrict this sweep to
+# CONCURRENCIES="1 2 4".
 SHAPES="${SHAPES:-1024:128 4096:256 8192:1024}"
 CONCURRENCIES="${CONCURRENCIES:-1 2 4 8 16 32}"
 # Enough prompts for percentiles to mean something: >= 10x concurrency.

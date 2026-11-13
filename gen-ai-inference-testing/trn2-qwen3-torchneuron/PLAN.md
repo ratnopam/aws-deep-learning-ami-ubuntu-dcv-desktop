@@ -63,6 +63,66 @@ Both TorchNeuron and the vLLM plugin are **Beta**. Expect API churn and pin exac
 
 ---
 
+## 2a. How TorchNeuron and vLLM actually connect
+
+The compile pipeline, end to end:
+
+```
+your model → TorchDynamo → FX graphs → AOT Autograd → Neuron FX passes
+           → StableHLO MLIR (NO TorchInductor) → neuronx-cc → NEFF → Neuron Runtime
+```
+
+vLLM does not reimplement any of this. The plugin compiles each model *through*
+TorchNeuron's `torch.compile` backend, so the serving stack and a standalone
+`@torch.compile(backend="neuron")` script share one compiler path. That is why the Phase 1
+smoke test is diagnostic: if `torch.compile(backend="neuron")` fails on a matmul, the fault is
+TorchNeuron, not vLLM.
+
+**`VLLM_NEURON_BACKEND` values** (two compilation routes):
+
+| Value | Route | Lowering | Default opt level |
+|---|---|---|---|
+| unset | **native (default)** | AOTAutograd + torch-mlir → StableHLO → `neuronx-cc` | O2 |
+| `neuron_native` | native | as above | O2 |
+| `neuron` | native | as above | O2 |
+| `vllm_neuron` | **XLA (deprecated)** | PyTorch/XLA → HLO → `neuronx-cc` | O1 |
+
+Both routes compile identical `torch.compile` graphs onto the same runtime; only the lowering
+differs. The XLA route is deprecated and slated for removal — use it only if the native route
+produces results you cannot accept.
+
+> Subtlety worth knowing: the native route is already the default, so setting
+> `VLLM_NEURON_BACKEND=neuron_native` does not change the route. But the **precompile cache
+> only activates when the variable is explicitly set**. Set it anyway.
+
+### Three things this pipeline implies
+
+**1. Dynamic shapes are not supported.** The backend forces `dynamic=False`; "each distinct
+input shape requires separate compilation." This is the single most operationally important
+fact in the whole stack: **buckets are not a tuning knob, they are the list of shapes that
+exist.** A benchmark sweep over input lengths and concurrency must be covered by the server's
+buckets or it recompiles mid-run and the latency numbers are garbage. Hence `SWEEP_MODE=1` in
+`serve/run_qwen3_32b.sh`, kept deliberately separate from the published control config.
+
+**2. Graph breaks degrade but do not fail.** When Dynamo hits an unsupported op or a
+data-dependent branch it splits the graph and compiles each segment independently — narrower
+optimisation scope, not an error. Trivial pass-through segments are skipped entirely.
+
+**3. Caching is three-layered**, and one layer is explicitly designed for what the lab store
+does:
+
+| Layer | Keyed by | Portable? |
+|---|---|---|
+| Persistent NEFF cache | lowered HLO + compiler config (content-addressed) | **yes — "reusable across instances via shared storage"** |
+| HLO cache | shared between eager and compiled modes | within a host |
+| Dynamo precompile cache | embeds StableHLO bytes for warm reload | fingerprint-bound |
+
+That middle column is why `labstore` keys on resolved versions and topology rather than on a
+friendly name, and the quoted phrase is direct documentation support for putting the cache on
+EFS/S3.
+
+Also: only `torch.compile(mode="default")` is supported — other modes warn and fall back.
+
 ## 3. The hardware, and the core math that drives every config
 
 `trn2.48xlarge`:
@@ -348,5 +408,9 @@ specifically wants to evaluate and it is where the "native PyTorch" claim is act
 - **O-2** When to fold into `launch.sh`/`compose/neuron.yaml` vs stay standalone.
 - **O-3** Is `Qwen/Qwen3-32B` gated? Confirm `HF_TOKEN` need and pin `BF16_REVISION` for reproducibility.
 - **O-4** Exact `--optimization-level` semantics (recipe uses O2 single-server, O3 for disaggregated decode).
-- **O-5** Does a 1k-input shape need its own bucket config, given buckets are pinned at 8192?
+- ~~**O-5** Does a 1k-input shape need its own bucket config, given buckets are pinned at 8192?~~
+  **RESOLVED from docs: yes.** The Neuron `torch.compile` backend forces `dynamic=False`, so
+  every distinct shape compiles separately. Buckets must enumerate every shape the sweep will
+  use. Handled by `SWEEP_MODE=1`, which is a separate fingerprint from the control config. See
+  Section 2a.
 - **O-6** Confirm the plugin's own `benchmarks/` directory contents — may supersede `bench/` here.

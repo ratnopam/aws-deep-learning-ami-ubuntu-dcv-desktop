@@ -26,11 +26,39 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-10240}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 
-# Bucket config. Changing any of these invalidates the compile-cache
-# fingerprint and forces a cold compile -- freeze before benchmarking.
-KV_SEGMENT_BUCKETS="${KV_SEGMENT_BUCKETS:-[8192]}"
-BATCHED_TOKENS_BUCKETS="${BATCHED_TOKENS_BUCKETS:-[8192]}"
-NUM_SEQS_BUCKETS="${NUM_SEQS_BUCKETS:-[$MAX_NUM_SEQS]}"
+# --- buckets: why this matters more than it looks -----------------------
+# torch.compile on Neuron DOES NOT SUPPORT DYNAMIC SHAPES -- the backend
+# forces dynamic=False, so "each distinct input shape requires separate
+# compilation". Buckets are the mechanism that pins the shapes which get
+# compiled. Any shape outside them means a recompile (or worse, mid-benchmark
+# stalls that corrupt your latency numbers).
+#
+# Two distinct configurations, deliberately NOT mixed:
+#
+#   SWEEP_MODE=0 (default) -- the published AWS Trn2 recipe, verbatim. This is
+#   the CONTROL: the only config with AWS correctness+performance validation.
+#   Valid for concurrency <= 4 only.
+#
+#   SWEEP_MODE=1 -- widened buckets so one compile covers a whole SLO sweep
+#   across concurrency and input length. This is a DIFFERENT fingerprint from
+#   the control, so it gets its own compile cache entry and its numbers are
+#   not directly comparable to the published recipe.
+SWEEP_MODE="${SWEEP_MODE:-0}"
+if [[ "$SWEEP_MODE" == "1" ]]; then
+  # max-num-seqs must be >= the largest num_seqs bucket, so raise it too.
+  MAX_NUM_SEQS="${MAX_NUM_SEQS_SWEEP:-32}"
+  MAX_MODEL_LEN="${MAX_MODEL_LEN_SWEEP:-10240}"
+  KV_SEGMENT_BUCKETS="${KV_SEGMENT_BUCKETS:-[2048,8192]}"
+  BATCHED_TOKENS_BUCKETS="${BATCHED_TOKENS_BUCKETS:-[2048,8192]}"
+  NUM_SEQS_BUCKETS="${NUM_SEQS_BUCKETS:-[1,2,4,8,16,32]}"
+  echo "SWEEP_MODE=1: widened buckets. NOT the published control config."
+  echo "  Every bucket combination compiles separately -- expect a longer"
+  echo "  first compile, then a sweep with no mid-run recompiles."
+else
+  KV_SEGMENT_BUCKETS="${KV_SEGMENT_BUCKETS:-[8192]}"
+  BATCHED_TOKENS_BUCKETS="${BATCHED_TOKENS_BUCKETS:-[8192]}"
+  NUM_SEQS_BUCKETS="${NUM_SEQS_BUCKETS:-[$MAX_NUM_SEQS]}"
+fi
 
 # --- environment ---------------------------------------------------------
 # These MUST be exported before Python starts. Setting them from inside

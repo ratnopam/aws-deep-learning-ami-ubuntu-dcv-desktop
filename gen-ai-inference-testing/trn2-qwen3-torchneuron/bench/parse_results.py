@@ -97,6 +97,104 @@ def find_knee(shape_rows: list[dict]) -> dict | None:
     return knee
 
 
+def check_slo(rows: list[dict], targets: dict[str, float]) -> list[dict]:
+    """Inverse of knee-finding: given SLO TARGETS, find the most load each
+    token shape can carry while still meeting every target.
+
+    Knee analysis answers "what SLO should we promise?". This answers the
+    operational question "given a promised SLO, how much traffic fits?" --
+    which is what capacity planning and EKS replica counts actually need.
+
+    `targets` maps a csv column (e.g. 'ttft_p99_ms') to its ceiling.
+    """
+    out = []
+    shapes = sorted({(r["input_len"], r["output_len"]) for r in rows})
+    for in_len, out_len in shapes:
+        srows = sorted((r for r in rows
+                        if r["input_len"] == in_len and r["output_len"] == out_len),
+                       key=lambda r: r["concurrency"])
+        passing, first_fail, binding = [], None, None
+        for r in srows:
+            violations = [
+                f"{col}={r[col]:.1f} > {lim:.1f}"
+                for col, lim in targets.items()
+                if col in r and not math.isnan(r[col]) and r[col] > lim
+            ]
+            if violations:
+                if first_fail is None:
+                    first_fail, binding = r, violations
+                # Keep scanning: latency is not always monotonic in concurrency,
+                # and reporting the true max feasible point matters more than
+                # stopping at the first blip.
+            else:
+                passing.append(r)
+        best = max(passing, key=lambda r: r["out_throughput"]) if passing else None
+        out.append({
+            "input_len": in_len, "output_len": out_len,
+            "best": best, "first_fail": first_fail, "binding": binding,
+            "n_passing": len(passing), "n_total": len(srows),
+        })
+    return out
+
+
+def write_slo_report(verdicts: list[dict], targets: dict[str, float],
+                     path: Path, replicas: int) -> None:
+    lines = [
+        "# SLO feasibility report",
+        "",
+        "Targets:",
+        *[f"- `{c}` <= {v:g}" for c, v in sorted(targets.items())],
+        "",
+        f"Replicas measured: {replicas}",
+        "",
+        "| in | out | max concurrency | out tok/s | p99 TTFT | p99 ITL | verdict |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for v in verdicts:
+        b = v["best"]
+        if b:
+            lines.append(
+                f"| {v['input_len']} | {v['output_len']} | **{b['concurrency']}** "
+                f"| {b['out_throughput']:.1f} | {b['ttft_p99_ms']:.1f} | {b['itl_p99_ms']:.1f} "
+                f"| MEETS SLO ({v['n_passing']}/{v['n_total']} points) |"
+            )
+        else:
+            lines.append(
+                f"| {v['input_len']} | {v['output_len']} | — | — | — | — "
+                f"| **INFEASIBLE** at every tested concurrency |"
+            )
+    lines.append("")
+    for v in verdicts:
+        shape = f"{v['input_len']}/{v['output_len']}"
+        if v["best"] is None:
+            lines += [
+                f"**{shape}: infeasible.** Even concurrency 1 misses the target"
+                f"{' (' + '; '.join(v['binding']) + ')' if v['binding'] else ''}. "
+                "The SLO is below this configuration's latency floor — relax the target, "
+                "shorten the prompt, or change TP/dtype. More replicas will NOT help: "
+                "they add throughput, not single-request speed.",
+                "",
+            ]
+        elif v["first_fail"] is not None:
+            lines += [
+                f"**{shape}: binds at concurrency {v['first_fail']['concurrency']}** — "
+                + "; ".join(v["binding"])
+                + f". Max safe load is concurrency {v['best']['concurrency']} at "
+                f"{v['best']['out_throughput']:.1f} out tok/s per replica. "
+                "Scale with replicas beyond that, not concurrency.",
+                "",
+            ]
+        else:
+            lines += [
+                f"**{shape}: met at every tested concurrency** (up to "
+                f"{v['best']['concurrency']}). The real ceiling is higher than the "
+                "sweep — extend `CONCURRENCIES` to find where it actually binds.",
+                "",
+            ]
+    path.write_text("\n".join(lines))
+    print(f"wrote {path}")
+
+
 def write_csv(rows: list[dict], path: Path) -> None:
     import csv
     cols = ["input_len", "output_len", "concurrency"] + [c for c, _ in FIELDS]
@@ -214,6 +312,16 @@ def main() -> None:
                     help="TP8 replicas served concurrently during the sweep")
     ap.add_argument("--hourly-cost", type=float, default=None,
                     help="Instance $/hr, to derive cost per million output tokens")
+    # SLO-target mode: the inverse of knee analysis. Supply the latency you
+    # must promise and get back the load that fits inside it.
+    ap.add_argument("--slo-ttft-p99", type=float, default=None, metavar="MS",
+                    help="Target: p99 time-to-first-token ceiling in ms")
+    ap.add_argument("--slo-itl-p99", type=float, default=None, metavar="MS",
+                    help="Target: p99 inter-token latency ceiling in ms")
+    ap.add_argument("--slo-tpot-p99", type=float, default=None, metavar="MS",
+                    help="Target: p99 time-per-output-token ceiling in ms")
+    ap.add_argument("--slo-e2e-p99", type=float, default=None, metavar="MS",
+                    help="Target: p99 end-to-end request latency ceiling in ms")
     args = ap.parse_args()
 
     rows = load(args.results_dir)
@@ -221,6 +329,25 @@ def main() -> None:
     write_csv(rows, args.results_dir / "slo_table.csv")
     write_slo(rows, args.results_dir / "slo_knee.md", args.replicas, args.hourly_cost)
     plot(rows, args.results_dir / "slo_curves.png")
+
+    targets = {k: v for k, v in {
+        "ttft_p99_ms": args.slo_ttft_p99,
+        "itl_p99_ms": args.slo_itl_p99,
+        "tpot_p99_ms": args.slo_tpot_p99,
+        "e2el_p99_ms": args.slo_e2e_p99,
+    }.items() if v is not None}
+    if targets:
+        verdicts = check_slo(rows, targets)
+        write_slo_report(verdicts, targets,
+                         args.results_dir / "slo_feasibility.md", args.replicas)
+        for v in verdicts:
+            b = v["best"]
+            shape = f"{v['input_len']}/{v['output_len']}"
+            if b:
+                print(f"  {shape}: max concurrency {b['concurrency']} "
+                      f"at {b['out_throughput']:.1f} out tok/s")
+            else:
+                print(f"  {shape}: INFEASIBLE at every tested concurrency")
 
 
 if __name__ == "__main__":

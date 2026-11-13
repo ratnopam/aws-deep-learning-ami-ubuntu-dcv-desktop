@@ -170,7 +170,23 @@ Resources:
           phase APT
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq || fail apt-update
-          apt-get install -y -qq python3-pip python3-venv git awscli jq || fail apt-install
+          # NOTE: 'awscli' is NOT an installable apt package on Ubuntu 24.04 --
+          # it was dropped from the default repos, and asking for it fails with
+          # "has no installation candidate". Install CLI v2 from AWS's own
+          # installer instead, which is also the version we actually want.
+          apt-get install -y -qq python3-pip python3-venv git jq curl unzip || fail apt-install
+
+          phase AWSCLI
+          if command -v aws >/dev/null 2>&1; then
+            phase AWSCLI_OK "preinstalled $(aws --version 2>&1)"
+          else
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip || fail awscli-download
+            unzip -q /tmp/awscliv2.zip -d /tmp/awscli-pkg || fail awscli-unzip
+            /tmp/awscli-pkg/aws/install >/dev/null || fail awscli-install
+            export PATH=/usr/local/bin:$PATH
+            command -v aws >/dev/null || fail awscli-missing-after-install
+            phase AWSCLI_OK "$(aws --version 2>&1)"
+          fi
 
           phase VENV
           python3 -m venv /opt/hf || fail venv

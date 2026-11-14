@@ -41,11 +41,10 @@ LOG="$HOME/.cache/trn2-desktop/launch.log"
 
 exec > >(tee -a "$LOG") 2>&1
 
-# Notifications go to two independent channels. The macOS one is immediate but
-# useless if the laptop is asleep -- which it will be at 03:25 PST. SNS reaches
-# you regardless of the machine's state, so it is the one that actually matters
-# for an unattended overnight launch. Set SNS_TOPIC_ARN to enable it.
-SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-arn:aws:sns:us-east-2:489829964455:trn2-launch-alerts}"
+# SNS notification is OPT-IN and off by default: set SNS_TOPIC_ARN to a topic
+# you own to enable it. Useful if the launch runs unattended on a machine that
+# may be asleep, since macOS desktop notifications are worthless then.
+SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-}"
 
 notify() {
   local title="$1" body="$2"

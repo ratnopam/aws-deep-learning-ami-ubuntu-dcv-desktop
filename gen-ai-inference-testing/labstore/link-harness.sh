@@ -19,6 +19,11 @@
 # Run nothing and the harness behaves exactly as it does today.
 set -uo pipefail
 
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  [[ -n "$HOME" ]] || HOME=/tmp
+  export HOME
+fi
 LAB_EFS_ROOT="${LAB_EFS_ROOT:-$HOME/efs/lab}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SNAP="$HOME/snapshots"

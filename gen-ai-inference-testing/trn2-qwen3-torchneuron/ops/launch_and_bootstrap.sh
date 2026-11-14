@@ -37,7 +37,19 @@ EFS_ID="${EFS_ID:-fs-090ea92bfa28de363}"
 # it. cr-0ca15816889289192 landed in us-east-2a, not the 2b used previously --
 # a hardcoded subnet would have failed the launch. Resolved at runtime below.
 SUBNET_ID="${SUBNET_ID:-}"
-LOG="$HOME/.cache/trn2-desktop/launch.log"
+# HOME is not guaranteed. cloud-init UserData runs with a minimal environment,
+# and under `set -u` an unset HOME is fatal -- which is exactly how this script
+# died on the remote launcher ("line 40: HOME: unbound variable") before it ever
+# reached the reservation poll. Same bug class as labstore.sh; swept across all
+# ops scripts rather than patched one file at a time.
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  [[ -n "$HOME" ]] || HOME=/tmp
+  export HOME
+fi
+
+LOG="${LOG:-$HOME/.cache/trn2-desktop/launch.log}"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || LOG=/tmp/launch.log
 
 exec > >(tee -a "$LOG") 2>&1
 

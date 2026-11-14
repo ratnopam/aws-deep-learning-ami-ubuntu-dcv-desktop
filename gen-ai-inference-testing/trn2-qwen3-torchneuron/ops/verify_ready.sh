@@ -10,7 +10,13 @@ set -uo pipefail
 REGION=us-east-2
 IID="${IID:-i-02b1dc0805521506e}"
 MAX_MIN="${MAX_MIN:-60}"
-LOG="$HOME/.cache/trn2-desktop/ready.log"
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  [[ -n "$HOME" ]] || HOME=/tmp
+  export HOME
+fi
+LOG="${LOG:-$HOME/.cache/trn2-desktop/ready.log}"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || LOG=/tmp/ready.log
 exec > >(tee -a "$LOG") 2>&1
 
 probe() {

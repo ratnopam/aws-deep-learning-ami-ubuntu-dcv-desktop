@@ -84,10 +84,24 @@ if [[ -n "$EXISTING" && "$EXISTING" != None ]]; then
   echo "stack $STACK_NAME already exists (status=$EXISTING) -- nothing to do"; exit 0
 fi
 
-PUBLIC_IP=$(curl -s --max-time 20 http://checkip.amazonaws.com/ | tr -d '[:space:]')
-[[ -n "$PUBLIC_IP" ]] || die "could not detect public IP; refusing to guess the DCV access CIDR"
-CIDR="${PUBLIC_IP}/32"
-echo "access CIDR: $CIDR"
+# DCV access CIDR. Auto-detection is correct when run from your laptop, but
+# WRONG when this script runs on an EC2 instance: checkip would return that
+# instance's address and the security group would lock you out of DCV
+# entirely. So an explicit DESKTOP_ACCESS_CIDR always wins.
+if [[ -n "${DESKTOP_ACCESS_CIDR:-}" ]]; then
+  CIDR="$DESKTOP_ACCESS_CIDR"
+  echo "access CIDR: $CIDR (explicit)"
+else
+  PUBLIC_IP=$(curl -s --max-time 20 http://checkip.amazonaws.com/ | tr -d '[:space:]')
+  [[ -n "$PUBLIC_IP" ]] || die "could not detect public IP; set DESKTOP_ACCESS_CIDR instead of guessing"
+  CIDR="${PUBLIC_IP}/32"
+  echo "access CIDR: $CIDR (auto-detected)"
+  # Guard against the exact mistake above: if we are on EC2, auto-detection is
+  # almost certainly wrong for a human's DCV client.
+  if curl -s --max-time 2 -o /dev/null http://169.254.169.254/latest/meta-data/ 2>/dev/null; then
+    die "auto-detected the CIDR while running on EC2 -- that would be this instance, not your workstation. Set DESKTOP_ACCESS_CIDR."
+  fi
+fi
 
 # Resolve the subnet from the reservation's own AZ. Targeted Capacity Blocks
 # are AZ-pinned; a mismatch is an unusable reservation, not a slow one.

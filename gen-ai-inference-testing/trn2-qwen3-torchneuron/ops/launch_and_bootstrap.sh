@@ -131,12 +131,25 @@ fi
 echo "reservation AZ: $CB_AZ -> subnet $SUBNET_ID"
 
 # The durable store must have a mount target in this AZ or EFS is unreachable.
-MT=$(aws efs describe-mount-targets --region "$REGION" --file-system-id "$EFS_ID" \
-  --query "length(MountTargets[?AvailabilityZoneName=='$CB_AZ'])" --output text 2>/dev/null)
-if [[ "$MT" == "0" || -z "$MT" ]]; then
-  die "EFS $EFS_ID has no mount target in $CB_AZ -- add one before launching"
+#
+# Distinguish "query failed" from "zero mount targets". The previous version
+# sent stderr to /dev/null and treated an empty result as zero, so an IAM
+# AccessDeniedException was reported as "no mount target in us-east-2a" --
+# sending me hunting for a missing mount target that was in fact present.
+# A wrong diagnosis costs more than no diagnosis.
+MT_OUT=$(aws efs describe-mount-targets --region "$REGION" --file-system-id "$EFS_ID" \
+  --query "length(MountTargets[?AvailabilityZoneName=='$CB_AZ'])" --output text 2>&1)
+MT_RC=$?
+if (( MT_RC != 0 )); then
+  die "could not query EFS mount targets (exit $MT_RC): $(printf '%s' "$MT_OUT" | head -2)"
 fi
-echo "lab store: $EFS_ID has a mount target in $CB_AZ"
+if ! [[ "$MT_OUT" =~ ^[0-9]+$ ]]; then
+  die "unexpected mount-target query output: $(printf '%s' "$MT_OUT" | head -2)"
+fi
+if (( MT_OUT == 0 )); then
+  die "EFS $EFS_ID genuinely has no mount target in $CB_AZ -- create one before launching"
+fi
+echo "lab store: $EFS_ID has $MT_OUT mount target(s) in $CB_AZ"
 
 # Wait for the block to go active. 'scheduled' means paid but not yet started.
 for _ in $(seq 1 480); do

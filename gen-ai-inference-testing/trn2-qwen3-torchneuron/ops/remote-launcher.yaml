@@ -83,8 +83,13 @@ Resources:
               - Effect: Allow
                 Action: 'ec2:*'
                 Resource: '*'
+              # NOTE: the IAM service prefix for EFS is 'elasticfilesystem', NOT
+              # 'efs'. An 'efs:*' statement grants nothing and fails silently at
+              # policy creation -- it only surfaces later as
+              # AccessDeniedException on elasticfilesystem:DescribeMountTargets.
               - Effect: Allow
-                Action: ['efs:DescribeMountTargets', 'efs:DescribeFileSystems']
+                Action: ['elasticfilesystem:DescribeMountTargets',
+                         'elasticfilesystem:DescribeFileSystems']
                 Resource: '*'
               - Effect: Allow
                 Action: ['ssm:SendCommand', 'ssm:GetCommandInvocation',

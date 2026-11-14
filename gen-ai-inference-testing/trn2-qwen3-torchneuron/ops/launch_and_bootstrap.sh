@@ -152,7 +152,12 @@ fi
 echo "lab store: $EFS_ID has $MT_OUT mount target(s) in $CB_AZ"
 
 # Wait for the block to go active. 'scheduled' means paid but not yet started.
-for _ in $(seq 1 480); do
+# 1440 iterations x 60s = 24h of patience. The previous 480 (8h) was sized for
+# starting shortly before a block, but this script may now be started many
+# hours ahead from a remote runner. Started at 04:08 UTC against an 11:30 UTC
+# block, 480 left only ~20 minutes of margin once the observed ~18 min
+# activation lag is accounted for. Waiting longer costs one API call a minute.
+for _ in $(seq 1 1440); do
   read -r STATE AVAIL < <(aws ec2 describe-capacity-reservations --region "$REGION" \
     --capacity-reservation-ids "$RESERVATION_ID" \
     --query 'CapacityReservations[0].[State,AvailableInstanceCount]' --output text 2>/dev/null)

@@ -22,7 +22,11 @@ set -uo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/ratnopam/aws-deep-learning-ami-ubuntu-dcv-desktop.git}"
 BRANCH="${BRANCH:-trn2-qwen3-torchneuron-vllm}"
-S3_BUCKET="${S3_BUCKET:-genai-trn2-489829964455-us-east-2}"
+# The durable lab store bucket (stack dl-lab-store). This previously defaulted
+# to genai-trn2-489829964455-us-east-2, which is EMPTY -- so on 2026-11-14 the
+# bootstrap reported "weights not in S3" while 65 GB sat in the lab bucket, and
+# would have re-downloaded the whole checkpoint from HuggingFace.
+S3_BUCKET="${S3_BUCKET:-dl-lab-store-489829964455-us-east-2}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-32B}"
 BF16_REVISION="${BF16_REVISION:-main}"
 DLC="${DLC:-public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.29.0.1.2.0-neuronx-py314-sdk2.33.0-ubuntu26.04}"

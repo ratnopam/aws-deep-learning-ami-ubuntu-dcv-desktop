@@ -237,11 +237,46 @@ done
 # Run bootstrap detached: it takes far longer than an SSM command may run.
 # It is fetched from the branch so the orchestration stays version-controlled.
 echo "firing bootstrap over SSM ..."
+# Pass the commands via a JSON FILE, not inline.
+#
+# The inline form with embedded single quotes is rejected by the AWS CLI
+# parameter parser ("ParamValidation: Expected ',' received '''") -- which is
+# exactly how the 2026-11-14 launch created the desktop but never dispatched
+# the bootstrap, so the morning started with a bare machine.
+#
+# Two further things this encodes, both learned the hard way on that instance:
+#   * Run as ubuntu through a LOGIN shell. SSM injects
+#     AWS_SHARED_CREDENTIALS_FILE=/var/lib/amazon/ssm/credentials pointing at
+#     the Default Host Management role, which has no S3 access; a login shell
+#     drops it and falls back to IMDS, i.e. the stack's own instance role.
+#   * Pass S3_BUCKET explicitly rather than trusting a default.
+SSM_JSON=$(mktemp /tmp/ssm-bootstrap-XXXXXX.json)
+"${PY_JSON:-python3}" - "$BRANCH" "$REPO_URL" "$S3_BUCKET" "$EFS_ID" "$REGION" >"$SSM_JSON" <<'PYEOF'
+import json, sys
+branch, repo, bucket, efs, region = sys.argv[1:6]
+inner = (
+    f"cd /tmp && rm -rf /tmp/bs && "
+    f"git clone --depth 1 -b {branch} {repo} /tmp/bs && "
+    f"chown -R ubuntu:ubuntu /tmp/bs && "
+    f"chmod +x /tmp/bs/gen-ai-inference-testing/trn2-qwen3-torchneuron/bootstrap.sh "
+    f"/tmp/bs/gen-ai-inference-testing/labstore/*.sh"
+)
+run = (
+    f"su - ubuntu -c '"
+    f"S3_BUCKET={bucket} LAB_S3_BUCKET={bucket} LAB_S3_PREFIX=lab "
+    f"EFS_ID={efs} AWS_REGION={region} "
+    f"nohup bash /tmp/bs/gen-ai-inference-testing/trn2-qwen3-torchneuron/bootstrap.sh "
+    f">/home/ubuntu/bootstrap-nohup.log 2>&1 &'"
+)
+json.dump({"commands": [inner, run, "echo dispatched"]}, sys.stdout)
+PYEOF
 CID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
   --comment "trn2 pre-staging bootstrap" \
-  --parameters commands="sudo -u ubuntu -i bash -c 'rm -rf /tmp/bs && git clone --depth 1 -b $BRANCH $REPO_URL /tmp/bs && nohup bash /tmp/bs/gen-ai-inference-testing/trn2-qwen3-torchneuron/bootstrap.sh >/dev/null 2>&1 & disown' ; echo dispatched" \
+  --parameters "file://$SSM_JSON" \
+  --timeout-seconds 600 \
   --query 'Command.CommandId' --output text 2>&1)
+rm -f "$SSM_JSON"
 [[ "$CID" == *-*-* ]] || die "SSM send-command failed: $CID"
 echo "bootstrap dispatched (ssm command $CID)"
 

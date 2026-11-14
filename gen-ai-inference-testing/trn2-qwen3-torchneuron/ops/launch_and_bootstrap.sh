@@ -41,8 +41,31 @@ LOG="$HOME/.cache/trn2-desktop/launch.log"
 
 exec > >(tee -a "$LOG") 2>&1
 
+# Notifications go to two independent channels. The macOS one is immediate but
+# useless if the laptop is asleep -- which it will be at 03:25 PST. SNS reaches
+# you regardless of the machine's state, so it is the one that actually matters
+# for an unattended overnight launch. Set SNS_TOPIC_ARN to enable it.
+SNS_TOPIC_ARN="${SNS_TOPIC_ARN:-arn:aws:sns:us-east-2:489829964455:trn2-launch-alerts}"
+
 notify() {
   local title="$1" body="$2"
+
+  # Channel 1: SNS -- machine-independent. Failures here must never abort a
+  # launch, so everything is swallowed.
+  if [[ -n "$SNS_TOPIC_ARN" ]]; then
+    aws sns publish --region "$REGION" --topic-arn "$SNS_TOPIC_ARN" \
+      --subject "$(printf '%.99s' "$title")" \
+      --message "$title
+
+$body
+
+stack       : $STACK_NAME
+reservation : $RESERVATION_ID
+time        : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+log         : $LOG" >/dev/null 2>&1 || true
+  fi
+
+  # Channel 2: macOS desktop notification, if anyone is watching.
   command -v terminal-notifier >/dev/null 2>&1 \
     && terminal-notifier -title "$title" -message "$body" -sound Glass >/dev/null 2>&1 && return
   command -v osascript >/dev/null 2>&1 \
